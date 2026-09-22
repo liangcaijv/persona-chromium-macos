@@ -22,17 +22,8 @@ if [[ -f "$_root_dir/build_finished_$_target_cpu.log" ]] ; then
 
   cd "$_src_dir"
 
-  # Prepare the certificate for app signing
-  printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$TMPDIR/certificate.p12"
-
-  security create-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
-  security default-keychain -s build.keychain
-  security unlock-keychain -p "$MACOS_CI_KEYCHAIN_PWD" build.keychain
-  security import "$TMPDIR/certificate.p12" -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
-  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CI_KEYCHAIN_PWD" build.keychain
-
-  # Sign, notarize, staple, and package using the same path as local builds.
-  "$_root_dir/sign_and_package_app.sh" "$_root_dir/$_file_name"
+  # No Developer ID in this fork: ad-hoc sign, skip notarization, still build the dmg.
+  MACOS_AD_HOC_SIGNING=1 "$_root_dir/sign_and_package_app.sh" "$_root_dir/$_file_name"
 
   cd "$_root_dir"
   echo -e "md5: \nsha1: \nsha256: " | tee ./hash_types.txt
