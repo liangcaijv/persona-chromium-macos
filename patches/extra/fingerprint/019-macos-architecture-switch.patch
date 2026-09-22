@@ -1,0 +1,69 @@
+Add --fingerprint-architecture so macOS personas can report "x86" (Intel Mac)
+instead of the hard-coded "arm" in the User-Agent client hints metadata.
+Default stays "arm" to preserve the imported behaviour.
+
+--- a/components/ungoogled/ungoogled_switches.cc
++++ b/components/ungoogled/ungoogled_switches.cc
+@@ -49,6 +49,10 @@ const char kFingerprintPlatform[] = "fingerprint-platform";
+ // Specify the operating system version
+ const char kFingerprintPlatformVersion[] = "fingerprint-platform-version";
+ 
++// Specify the CPU architecture reported by User-Agent client hints on macOS
++// ("x86" for Intel Macs, "arm" for Apple silicon; default "arm")
++const char kFingerprintArchitecture[] = "fingerprint-architecture";
++
+ // Specify the location
+ const char kFingerprintLocation[] = "fingerprint-location";
+ 
+--- a/components/ungoogled/ungoogled_switches.h
++++ b/components/ungoogled/ungoogled_switches.h
+@@ -27,5 +27,6 @@ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintDeviceMemory[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatform[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatformVersion[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintArchitecture[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintLocation[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintTimezone[];
+ }
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3914,6 +3914,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+       switches::kFingerprintDeviceMemory,
+       switches::kFingerprintPlatform,
+       switches::kFingerprintPlatformVersion,
++      switches::kFingerprintArchitecture,
+       switches::kFingerprintLocation,
+       switches::kFingerprintTimezone,
+       switches::kForceDeviceScaleFactor,
+--- a/third_party/blink/common/user_agent/user_agent_metadata.cc
++++ b/third_party/blink/common/user_agent/user_agent_metadata.cc
+@@ -344,6 +344,21 @@ std::string GetPlatformVersion(const std::string& platform) {
+   return "";
+ }
+ 
++// --fingerprint-architecture selects the UA-CH architecture for macOS personas.
++// Intel Macs report "x86"; Apple silicon (the default) reports "arm".
++std::string GetMacosArchitecture() {
++  using namespace ungoogled::fingerprint;
++  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(switches::kFingerprintArchitecture)) {
++    std::string value = base::ToLowerASCII(
++        command_line->GetSwitchValueASCII(switches::kFingerprintArchitecture));
++    if (value == "x86") {
++      return kX86Architecture;
++    }
++  }
++  return kArmArchitecture;
++}
++
+ void UpdateUserAgentMetadataFingerprint(blink::UserAgentMetadata* metadata) {
+   if (!metadata)
+     return;
+@@ -414,7 +429,7 @@ void UpdateUserAgentMetadataFingerprint(blink::UserAgentMetadata* metadata) {
+     } else if (platform_value == "macos") {
+       metadata->platform = kMacOSPlatform;
+       metadata->platform_version = GetPlatformVersion("macos");
+-      metadata->architecture = kArmArchitecture;
++      metadata->architecture = GetMacosArchitecture();
+     }
+   }
+ }
