@@ -1,0 +1,63 @@
+Honour --lang on macOS the way Windows and Linux already do: when the browser
+process gets --lang and it resolves to a bundled localization, use it as the
+app locale instead of the macOS preferred language. The renderer locale (Intl),
+the default text encoding and the per-script default fonts all derive from the
+app locale, so a persona's language no longer leaks the host's system language.
+Without --lang, or with a value that does not resolve, behaviour is unchanged.
+
+--- a/ui/base/l10n/l10n_util_mac.h
++++ b/ui/base/l10n/l10n_util_mac.h
+@@ -104,6 +104,9 @@
+ 
+ // Support the override of the locale with the value from Cocoa.
+ COMPONENT_EXPORT(UI_BASE) void OverrideLocaleWithCocoaLocale();
++// Support the override of the locale with an explicit, already resolved value
++// (persona-chromium: an explicit --lang on macOS).
++COMPONENT_EXPORT(UI_BASE) void OverrideLocale(const std::string& locale);
+ COMPONENT_EXPORT(UI_BASE) const std::string& GetLocaleOverride();
+ 
+ }  // namespace l10n_util
+--- a/ui/base/l10n/l10n_util_mac.mm
++++ b/ui/base/l10n/l10n_util_mac.mm
+@@ -65,6 +65,13 @@
+   g_overridden_locale.Get() = locale_value;
+ }
+ 
++void OverrideLocale(const std::string& locale) {
++  // Same threading contract as OverrideLocaleWithCocoaLocale(): called once on
++  // the main thread during startup, before other threads read the override.
++  DCHECK(NSThread.isMainThread);
++  g_overridden_locale.Get() = locale;
++}
++
+ // Remove the Windows-style accelerator marker and change "..." into an
+ // ellipsis.  Returns the result in an autoreleased NSString.
+ NSString* FixUpWindowsStyleLabel(const std::u16string& label) {
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -1723,7 +1723,24 @@
+     // ChromeBrowserMainParts::PreEarlyInitialization().
+     // Don't do this if the locale is already set, which is done by integration
+     // tests to ensure tests always run with the same locale.
+-    l10n_util::OverrideLocaleWithCocoaLocale();
++    //
++    // persona-chromium: an explicit --lang wins, as it does on Windows and
++    // Linux, so the app locale -- and with it the renderer locale, the default
++    // text encoding and the per-script default fonts -- follows the requested
++    // language instead of the macOS preferred language. A value that does not
++    // resolve to a bundled localization keeps the Cocoa behaviour.
++    const base::CommandLine& lang_command_line =
++        *base::CommandLine::ForCurrentProcess();
++    std::optional<std::string> requested_locale;
++    if (lang_command_line.HasSwitch(switches::kLang)) {
++      requested_locale = l10n_util::CheckAndResolveLocale(
++          lang_command_line.GetSwitchValueASCII(switches::kLang));
++    }
++    if (requested_locale.has_value()) {
++      l10n_util::OverrideLocale(*requested_locale);
++    } else {
++      l10n_util::OverrideLocaleWithCocoaLocale();
++    }
+   }
+ #endif
+ 
