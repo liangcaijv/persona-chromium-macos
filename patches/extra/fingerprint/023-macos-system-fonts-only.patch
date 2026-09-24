@@ -1,0 +1,137 @@
+With a fingerprint persona (--fingerprint, unless --disable-spoofing contains
+"font"), web content on macOS only sees the fonts that ship with the system in
+/System/Library/Fonts. Fonts macOS downloaded for the host's languages
+(/System/Library/AssetsV2) or that were installed separately behave as if they
+were not installed: font-family and local() lookups do not find them, and
+per-character fallback takes the first system font of the --lang cascade list
+that can draw the character instead. Without --fingerprint, behaviour is
+unchanged.
+
+--- a/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm
++++ b/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm
+@@ -39,9 +39,12 @@
+ #include "base/apple/bridging.h"
+ #include "base/apple/foundation_util.h"
+ #include "base/apple/scoped_cftyperef.h"
++#include "base/command_line.h"
+ #include "base/location.h"
+ #include "base/metrics/histogram_macros.h"
++#include "base/strings/sys_string_conversions.h"
+ #include "base/timer/elapsed_timer.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/platform/font_family_names.h"
+ #include "third_party/blink/renderer/platform/fonts/font_description.h"
+@@ -124,6 +127,78 @@
+                           kCFCompareCaseInsensitive) == kCFCompareEqualTo);
+ }
+ 
++// persona-chromium: with a fingerprint persona, web content only sees the
++// fonts that ship with macOS in /System/Library/Fonts. Fonts macOS downloaded
++// for the host's languages (/System/Library/AssetsV2) or that were installed
++// separately behave as if they were not installed, both for font-family
++// lookups and for per-character fallback. --disable-spoofing=font turns this
++// off together with the other font spoofing.
++bool HideHostOnlyFonts() {
++  const base::CommandLine& command_line =
++      *base::CommandLine::ForCurrentProcess();
++  return command_line.HasSwitch(switches::kFingerprint) &&
++         command_line.GetSwitchValueASCII(switches::kDisableSpoofing)
++                 .find("font") == std::string::npos;
++}
++
++// True when `font` comes from a file outside /System/Library/Fonts. A font
++// without a file URL counts as a system font.
++bool IsHostOnlyFont(CTFontRef font) {
++  ScopedCFTypeRef<CFTypeRef> attribute(
++      CTFontCopyAttribute(font, kCTFontURLAttribute));
++  CFURLRef url = base::apple::CFCast<CFURLRef>(attribute.get());
++  if (!url) {
++    return false;
++  }
++  NSString* path = CFToNSPtrCast(url).path;
++  return path && ![path hasPrefix:@"/System/Library/Fonts/"];
++}
++
++// The first font of the persona language's cascade list for `base` that is
++// installed, is a system font and can draw `character`; null if none can.
++ScopedCFTypeRef<CTFontRef> SystemCascadeFont(CTFontRef base,
++                                             UChar32 character,
++                                             float size) {
++  // switches::kLang, read by name to keep ui/base out of this file.
++  const std::string lang =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("lang");
++  NSArray* languages =
++      lang.empty() ? nil : @[ base::SysUTF8ToNSString(lang) ];
++  NSArray* cascade =
++      CFToNSOwnershipCast(CTFontCopyDefaultCascadeListForLanguages(
++          base, NSToCFPtrCast(languages)));
++  for (id item in cascade) {
++    CTFontDescriptorRef descriptor = (__bridge CTFontDescriptorRef)item;
++    ScopedCFTypeRef<CFTypeRef> name_attribute(
++        CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute));
++    CFStringRef wanted =
++        base::apple::CFCast<CFStringRef>(name_attribute.get());
++    if (!wanted || CFStringHasPrefix(wanted, CFSTR("."))) {
++      continue;
++    }
++    ScopedCFTypeRef<CTFontRef> candidate(
++        CTFontCreateWithFontDescriptor(descriptor, size, nullptr));
++    if (!candidate || IsLastResortFont(candidate.get()) ||
++        IsHostOnlyFont(candidate.get())) {
++      continue;
++    }
++    // A cascade entry that is not installed comes back as another font.
++    ScopedCFTypeRef<CFStringRef> actual(
++        CTFontCopyPostScriptName(candidate.get()));
++    if (!actual ||
++        CFStringCompare(actual.get(), wanted, 0) != kCFCompareEqualTo) {
++      continue;
++    }
++    ScopedCFTypeRef<CFCharacterSetRef> characters(
++        CTFontCopyCharacterSet(candidate.get()));
++    if (characters &&
++        CFCharacterSetIsLongCharacterMember(characters.get(), character)) {
++      return candidate;
++    }
++  }
++  return ScopedCFTypeRef<CTFontRef>(nullptr);
++}
++
+ ScopedCFTypeRef<CTFontRef> GetSubstituteFont(CTFontRef ct_font,
+                                              UChar32 character,
+                                              float size) {
+@@ -153,6 +228,20 @@
+     return ScopedCFTypeRef<CTFontRef>(nullptr);
+   }
+ 
++  // persona-chromium: never fall back to a font only the host has (see
++  // HideHostOnlyFonts()); take the persona language's cascade list instead.
++  if (HideHostOnlyFonts() && IsHostOnlyFont(substitute_font.get())) {
++    ScopedCFTypeRef<CTFontRef> times;
++    if (!ct_font) {
++      times.reset(CTFontCreateWithName(CFSTR("Times"), size, nullptr));
++    }
++    substitute_font =
++        SystemCascadeFont(ct_font ? ct_font : times.get(), character, size);
++    if (!substitute_font) {
++      return ScopedCFTypeRef<CTFontRef>(nullptr);
++    }
++  }
++
+   // System API might return colored "Apple Color Emoji" font for some emoji
+   // code points. It might also return ".Apple Color Emoji UI" when starting
+   // from system-ui. But if an emoji code point was requested and fallback
+@@ -417,6 +506,12 @@
+   if (!matched_font)
+     return nullptr;
+ 
++  // persona-chromium: a font only the host has behaves as if it were not
++  // installed (see HideHostOnlyFonts()).
++  if (HideHostOnlyFonts() && IsHostOnlyFont(matched_font.get())) {
++    return nullptr;
++  }
++
+   CTFontSymbolicTraits matched_font_traits =
+       CTFontGetSymbolicTraits(matched_font.get());
+ 
