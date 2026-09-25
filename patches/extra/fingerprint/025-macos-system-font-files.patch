@@ -1,0 +1,82 @@
+With a fingerprint persona, 024 replaces a font only the host has by the copy
+that ships with macOS under the same PostScript name. CoreText resolves such
+a name to the download whenever it matches by name, including when Skia
+copies the font to draw it, so text was shaped with the glyph IDs of the
+shipped PingFang and drawn with the glyphs of the downloaded one. Those
+copies are now made from descriptors of the system file itself, which every
+copy keeps; a name whose system file cannot be read is left out, so the
+download stays hidden. Without --fingerprint, behaviour is unchanged.
+
+--- a/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm
++++ b/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm
+@@ -170,10 +170,17 @@
+ // The available fonts that ship with macOS, by PostScript name. A font macOS
+ // downloaded for the host's languages can have a copy that ships with macOS
+ // under the same name (PingFang SC in PingFangUI.ttc); a Mac without the
+-// download uses that copy.
++// download uses that copy. CoreText resolves such a name to the download
++// whenever it matches by name, including when Skia copies a font to draw it,
++// which would draw the glyph IDs of one file with the glyphs of the other.
++// Those names therefore get descriptors made from the system file itself,
++// which every copy keeps; a name whose system file cannot be read is left
++// out, so the download stays hidden.
+ NSDictionary* SystemFontDescriptors() {
+   static NSDictionary* const descriptors = [] {
+     NSMutableDictionary* result = [NSMutableDictionary dictionary];
++    NSMutableDictionary* files = [NSMutableDictionary dictionary];
++    NSMutableSet* host_only_names = [NSMutableSet set];
+     ScopedCFTypeRef<CTFontCollectionRef> collection(
+         CTFontCollectionCreateFromAvailableFonts(nullptr));
+     NSArray* available = CFToNSOwnershipCast(
+@@ -187,12 +194,48 @@
+           CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute));
+       CFStringRef name = base::apple::CFCast<CFStringRef>(name_attribute.get());
+       NSString* path = url ? CFToNSPtrCast(url).path : nil;
+-      if (!name || !path || !IsSystemFontPath(path) ||
+-          result[CFToNSPtrCast(name)]) {
++      if (!name || !path) {
+         continue;
+       }
+-      result[CFToNSPtrCast(name)] = item;
++      NSString* key = CFToNSPtrCast(name);
++      if (!IsSystemFontPath(path)) {
++        [host_only_names addObject:key];
++        continue;
++      }
++      if (result[key]) {
++        continue;
++      }
++      result[key] = item;
++      files[key] = CFToNSPtrCast(url);
+     }
++    NSMutableDictionary* names_by_file = [NSMutableDictionary dictionary];
++    for (NSString* key in host_only_names) {
++      NSURL* file = files[key];
++      if (!file) {
++        continue;
++      }
++      [result removeObjectForKey:key];
++      NSMutableSet* names = names_by_file[file];
++      if (!names) {
++        names = [NSMutableSet set];
++        names_by_file[file] = names;
++      }
++      [names addObject:key];
++    }
++    for (NSURL* file in names_by_file) {
++      NSSet* names = names_by_file[file];
++      NSArray* from_file = CFToNSOwnershipCast(
++          CTFontManagerCreateFontDescriptorsFromURL(NSToCFPtrCast(file)));
++      for (id item in from_file) {
++        ScopedCFTypeRef<CFTypeRef> name_attribute(CTFontDescriptorCopyAttribute(
++            (__bridge CTFontDescriptorRef)item, kCTFontNameAttribute));
++        CFStringRef name =
++            base::apple::CFCast<CFStringRef>(name_attribute.get());
++        if (name && [names containsObject:CFToNSPtrCast(name)]) {
++          result[CFToNSPtrCast(name)] = item;
++        }
++      }
++    }
+     return [result copy];
+   }();
+   return descriptors;
