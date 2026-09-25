@@ -1,0 +1,306 @@
+With a fingerprint persona (--fingerprint, unless --disable-spoofing contains
+"font"), 023 lets web content see only the fonts that ship with macOS. The
+reserved fonts of FontServices.framework (PingFangUI.ttc: the system font's
+Chinese, and PingFang SC, TC, HK and MO) ship with macOS too, so system-ui no
+longer draws Chinese with the primary font's missing glyph. A font only the
+host has that also ships with macOS under the same PostScript name (PingFang
+downloaded for the host's languages) is replaced by the copy that ships with
+macOS in lookups, fallback and style matching, as on a Mac without the
+download. The per-script default font lists (such as ",Osaka,BIZ
+UDGothic,Menlo") skip families the host only has. Without --fingerprint,
+behaviour is unchanged.
+
+--- a/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm
++++ b/third_party/blink/renderer/platform/fonts/mac/font_cache_mac.mm
+@@ -35,6 +35,7 @@
+ #include <Foundation/Foundation.h>
+ 
+ #include <memory>
++#include <utility>
+ 
+ #include "base/apple/bridging.h"
+ #include "base/apple/foundation_util.h"
+@@ -128,11 +129,12 @@
+ }
+ 
+ // persona-chromium: with a fingerprint persona, web content only sees the
+-// fonts that ship with macOS in /System/Library/Fonts. Fonts macOS downloaded
++// fonts that ship with macOS (see IsSystemFontPath()). Fonts macOS downloaded
+ // for the host's languages (/System/Library/AssetsV2) or that were installed
+ // separately behave as if they were not installed, both for font-family
+-// lookups and for per-character fallback. --disable-spoofing=font turns this
+-// off together with the other font spoofing.
++// lookups and for per-character fallback; where macOS ships a copy of such a
++// font, that copy is used instead. --disable-spoofing=font turns this off
++// together with the other font spoofing.
+ bool HideHostOnlyFonts() {
+   const base::CommandLine& command_line =
+       *base::CommandLine::ForCurrentProcess();
+@@ -141,7 +143,18 @@
+                  .find("font") == std::string::npos;
+ }
+ 
+-// True when `font` comes from a file outside /System/Library/Fonts. A font
++// Fonts that ship with macOS: /System/Library/Fonts, and the reserved fonts of
++// FontServices.framework (PingFangUI.ttc: the system font's Chinese, and the
++// PingFang SC, TC, HK and MO families). Both are on the sealed system volume;
++// fonts macOS downloads for the host's languages are in
++// /System/Library/AssetsV2 on the data volume.
++bool IsSystemFontPath(NSString* path) {
++  return [path hasPrefix:@"/System/Library/Fonts/"] ||
++         [path hasPrefix:
++                   @"/System/Library/PrivateFrameworks/FontServices.framework/"];
++}
++
++// True when `font` comes from a file that does not ship with macOS. A font
+ // without a file URL counts as a system font.
+ bool IsHostOnlyFont(CTFontRef font) {
+   ScopedCFTypeRef<CFTypeRef> attribute(
+@@ -151,11 +164,62 @@
+     return false;
+   }
+   NSString* path = CFToNSPtrCast(url).path;
+-  return path && ![path hasPrefix:@"/System/Library/Fonts/"];
++  return path && !IsSystemFontPath(path);
+ }
+ 
++// The available fonts that ship with macOS, by PostScript name. A font macOS
++// downloaded for the host's languages can have a copy that ships with macOS
++// under the same name (PingFang SC in PingFangUI.ttc); a Mac without the
++// download uses that copy.
++NSDictionary* SystemFontDescriptors() {
++  static NSDictionary* const descriptors = [] {
++    NSMutableDictionary* result = [NSMutableDictionary dictionary];
++    ScopedCFTypeRef<CTFontCollectionRef> collection(
++        CTFontCollectionCreateFromAvailableFonts(nullptr));
++    NSArray* available = CFToNSOwnershipCast(
++        CTFontCollectionCreateMatchingFontDescriptors(collection.get()));
++    for (id item in available) {
++      CTFontDescriptorRef descriptor = (__bridge CTFontDescriptorRef)item;
++      ScopedCFTypeRef<CFTypeRef> url_attribute(
++          CTFontDescriptorCopyAttribute(descriptor, kCTFontURLAttribute));
++      CFURLRef url = base::apple::CFCast<CFURLRef>(url_attribute.get());
++      ScopedCFTypeRef<CFTypeRef> name_attribute(
++          CTFontDescriptorCopyAttribute(descriptor, kCTFontNameAttribute));
++      CFStringRef name = base::apple::CFCast<CFStringRef>(name_attribute.get());
++      NSString* path = url ? CFToNSPtrCast(url).path : nil;
++      if (!name || !path || !IsSystemFontPath(path) ||
++          result[CFToNSPtrCast(name)]) {
++        continue;
++      }
++      result[CFToNSPtrCast(name)] = item;
++    }
++    return [result copy];
++  }();
++  return descriptors;
++}
++
++// The copy of `font` that ships with macOS (same PostScript name); null if
++// there is none.
++ScopedCFTypeRef<CTFontRef> SystemCopyOfFont(CTFontRef font, float size) {
++  ScopedCFTypeRef<CFStringRef> name(CTFontCopyPostScriptName(font));
++  id descriptor =
++      name ? SystemFontDescriptors()[CFToNSPtrCast(name.get())] : nil;
++  if (!descriptor) {
++    return ScopedCFTypeRef<CTFontRef>(nullptr);
++  }
++  return ScopedCFTypeRef<CTFontRef>(CTFontCreateWithFontDescriptor(
++      (__bridge CTFontDescriptorRef)descriptor, size, nullptr));
++}
++
++bool CanDrawCharacter(CTFontRef font, UChar32 character) {
++  ScopedCFTypeRef<CFCharacterSetRef> characters(CTFontCopyCharacterSet(font));
++  return characters &&
++         CFCharacterSetIsLongCharacterMember(characters.get(), character);
++}
++
+ // The first font of the persona language's cascade list for `base` that is
+-// installed, is a system font and can draw `character`; null if none can.
++// installed and can draw `character`, taking the copy that ships with macOS of
++// a font only the host has; null if none can.
+ ScopedCFTypeRef<CTFontRef> SystemCascadeFont(CTFontRef base,
+                                              UChar32 character,
+                                              float size) {
+@@ -178,8 +242,10 @@
+     }
+     ScopedCFTypeRef<CTFontRef> candidate(
+         CTFontCreateWithFontDescriptor(descriptor, size, nullptr));
+-    if (!candidate || IsLastResortFont(candidate.get()) ||
+-        IsHostOnlyFont(candidate.get())) {
++    if (candidate && IsHostOnlyFont(candidate.get())) {
++      candidate = SystemCopyOfFont(candidate.get(), size);
++    }
++    if (!candidate || IsLastResortFont(candidate.get())) {
+       continue;
+     }
+     // A cascade entry that is not installed comes back as another font.
+@@ -189,10 +255,7 @@
+         CFStringCompare(actual.get(), wanted, 0) != kCFCompareEqualTo) {
+       continue;
+     }
+-    ScopedCFTypeRef<CFCharacterSetRef> characters(
+-        CTFontCopyCharacterSet(candidate.get()));
+-    if (characters &&
+-        CFCharacterSetIsLongCharacterMember(characters.get(), character)) {
++    if (CanDrawCharacter(candidate.get(), character)) {
+       return candidate;
+     }
+   }
+@@ -229,16 +292,23 @@
+   }
+ 
+   // persona-chromium: never fall back to a font only the host has (see
+-  // HideHostOnlyFonts()); take the persona language's cascade list instead.
++  // HideHostOnlyFonts()); take its copy that ships with macOS, or else the
++  // persona language's cascade list.
+   if (HideHostOnlyFonts() && IsHostOnlyFont(substitute_font.get())) {
+-    ScopedCFTypeRef<CTFontRef> times;
+-    if (!ct_font) {
+-      times.reset(CTFontCreateWithName(CFSTR("Times"), size, nullptr));
+-    }
+-    substitute_font =
+-        SystemCascadeFont(ct_font ? ct_font : times.get(), character, size);
+-    if (!substitute_font) {
+-      return ScopedCFTypeRef<CTFontRef>(nullptr);
++    ScopedCFTypeRef<CTFontRef> system_copy =
++        SystemCopyOfFont(substitute_font.get(), size);
++    if (system_copy && CanDrawCharacter(system_copy.get(), character)) {
++      substitute_font = std::move(system_copy);
++    } else {
++      ScopedCFTypeRef<CTFontRef> times;
++      if (!ct_font) {
++        times.reset(CTFontCreateWithName(CFSTR("Times"), size, nullptr));
++      }
++      substitute_font =
++          SystemCascadeFont(ct_font ? ct_font : times.get(), character, size);
++      if (!substitute_font) {
++        return ScopedCFTypeRef<CTFontRef>(nullptr);
++      }
+     }
+   }
+ 
+@@ -336,6 +406,11 @@
+     ScopedCFTypeRef<CTFontRef> best_variation =
+         CreateCopyWithTraitsAndWeightFromFont(substitute_font.get(), traits,
+                                               weight, size);
++    // persona-chromium: the style match can pick a copy only the host has.
++    if (best_variation && HideHostOnlyFonts() &&
++        IsHostOnlyFont(best_variation.get())) {
++      best_variation = SystemCopyOfFont(best_variation.get(), size);
++    }
+ 
+     if (best_variation) {
+       CTFontSymbolicTraits best_variation_font_traits =
+@@ -507,9 +582,13 @@
+     return nullptr;
+ 
+   // persona-chromium: a font only the host has behaves as if it were not
+-  // installed (see HideHostOnlyFonts()).
++  // installed (see HideHostOnlyFonts()); where macOS ships a copy of it, that
++  // copy is used, as on a Mac without the download.
+   if (HideHostOnlyFonts() && IsHostOnlyFont(matched_font.get())) {
+-    return nullptr;
++    matched_font = SystemCopyOfFont(matched_font.get(), size);
++    if (!matched_font) {
++      return nullptr;
++    }
+   }
+ 
+   CTFontSymbolicTraits matched_font_traits =
+--- a/ui/gfx/font_list.cc
++++ b/ui/gfx/font_list.cc
+@@ -18,6 +18,12 @@
+ #include "ui/gfx/font_list_impl.h"
+ 
+ #if BUILDFLAG(IS_MAC)
++#include <CoreText/CoreText.h>
++
++#include "base/apple/foundation_util.h"
++#include "base/apple/scoped_cftyperef.h"
++#include "base/command_line.h"
++#include "base/strings/sys_string_conversions.h"
+ #include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
+ #endif
+ 
+@@ -39,6 +45,65 @@
+ }
+ #endif
+ 
++#if BUILDFLAG(IS_MAC)
++// persona-chromium: with a fingerprint persona (--fingerprint, unless
++// --disable-spoofing contains "font"), web content only sees the fonts that
++// ship with macOS (font_cache_mac.mm), so the per-script default font lists
++// skip families the host only has as downloads or separate installs, as on a
++// Mac without them. The switches are read by name to keep
++// components/ungoogled out of ui/gfx.
++bool HideHostOnlyFonts() {
++  const base::CommandLine& command_line =
++      *base::CommandLine::ForCurrentProcess();
++  return command_line.HasSwitch("fingerprint") &&
++         command_line.GetSwitchValueASCII("disable-spoofing").find("font") ==
++             std::string::npos;
++}
++
++// Families with an available font that ships with macOS: the same locations
++// as IsSystemFontPath() in font_cache_mac.mm, and a font without a file URL
++// counts as a system font there too.
++absl::flat_hash_set<std::string> SystemFontFamilies() {
++  absl::flat_hash_set<std::string> families;
++  base::apple::ScopedCFTypeRef<CTFontCollectionRef> collection(
++      CTFontCollectionCreateFromAvailableFonts(nullptr));
++  base::apple::ScopedCFTypeRef<CFArrayRef> descriptors(
++      CTFontCollectionCreateMatchingFontDescriptors(collection.get()));
++  if (!descriptors) {
++    return families;
++  }
++  for (CFIndex i = 0; i < CFArrayGetCount(descriptors.get()); ++i) {
++    CTFontDescriptorRef descriptor = base::apple::CFCast<CTFontDescriptorRef>(
++        CFArrayGetValueAtIndex(descriptors.get(), i));
++    if (!descriptor) {
++      continue;
++    }
++    base::apple::ScopedCFTypeRef<CFTypeRef> family_attribute(
++        CTFontDescriptorCopyAttribute(descriptor, kCTFontFamilyNameAttribute));
++    base::apple::ScopedCFTypeRef<CFTypeRef> url_attribute(
++        CTFontDescriptorCopyAttribute(descriptor, kCTFontURLAttribute));
++    CFStringRef family =
++        base::apple::CFCast<CFStringRef>(family_attribute.get());
++    CFURLRef url = base::apple::CFCast<CFURLRef>(url_attribute.get());
++    if (!family) {
++      continue;
++    }
++    if (url) {
++      base::apple::ScopedCFTypeRef<CFStringRef> path(
++          CFURLCopyFileSystemPath(url, kCFURLPOSIXPathStyle));
++      const std::string file = base::SysCFStringRefToUTF8(path.get());
++      if (!file.starts_with("/System/Library/Fonts/") &&
++          !file.starts_with(
++              "/System/Library/PrivateFrameworks/FontServices.framework/")) {
++        continue;
++      }
++    }
++    families.insert(base::SysCFStringRefToUTF8(family));
++  }
++  return families;
++}
++#endif
++
+ }  // namespace
+ 
+ namespace gfx {
+@@ -266,8 +331,14 @@
+     fm->getFamilyName(i, &name);
+     availables.emplace(name.data(), name.size());
+   }
++  // persona-chromium: skip families only the host has (see above).
++  const bool hide_host_only_fonts = HideHostOnlyFonts();
++  const absl::flat_hash_set<std::string> system_families =
++      hide_host_only_fonts ? SystemFontFamilies()
++                           : absl::flat_hash_set<std::string>();
+   for (const std::string_view family : families) {
+-    if (availables.contains(family)) {
++    if (availables.contains(family) &&
++        (!hide_host_only_fonts || system_families.contains(family))) {
+       return std::string(family);
+     }
+   }
