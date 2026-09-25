@@ -34,3 +34,4 @@ extra/fingerprint/019-macos-architecture-switch.patch
 extra/fingerprint/020-macos-lang-switch.patch
 extra/fingerprint/022-macos-cocoa-lang.patch
 extra/fingerprint/023-macos-system-fonts-only.patch
+extra/fingerprint/021-macos-persona-screen.patch

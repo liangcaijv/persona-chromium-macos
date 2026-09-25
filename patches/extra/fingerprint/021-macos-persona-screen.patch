@@ -1,0 +1,222 @@
+With a fingerprint persona whose screen differs from the host's built-in
+display (--fingerprint-screen-width and --fingerprint-screen-height, unless
+--disable-spoofing contains "screen"), web content on macOS sees the persona's
+screen: the built-in display (the primary display when there is none) keeps
+its origin but reports the persona's size, and its available area keeps the
+real menu bar and Dock insets. Zooming and resizing a browser window on that
+display stop at the persona's available area. Without these switches,
+behaviour is unchanged.
+
+--- a/content/browser/renderer_host/render_widget_host_impl.cc
++++ b/content/browser/renderer_host/render_widget_host_impl.cc
+@@ -55,6 +55,7 @@
+ #include "components/input/switches.h"
+ #include "components/input/timeout_monitor.h"
+ #include "components/input/utils.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "components/viz/common/features.h"
+ #include "components/viz/common/frame_sinks/copy_output_result.h"
+ #include "components/viz/host/host_frame_sink_manager.h"
+@@ -351,6 +352,70 @@
+   }
+ 
+   return hosts;
++}
++
++// persona-chromium: with a fingerprint persona whose screen differs from the
++// host's built-in display, web content sees the persona's screen. The size
++// comes from --fingerprint-screen-width/height; --disable-spoofing=screen turns
++// it off.
++std::optional<gfx::Size> PersonaScreenSize() {
++  const base::CommandLine& command_line =
++      *base::CommandLine::ForCurrentProcess();
++  int width = 0;
++  int height = 0;
++  if (!command_line.HasSwitch(switches::kFingerprint) ||
++      command_line.GetSwitchValueASCII(switches::kDisableSpoofing)
++              .find("screen") != std::string::npos ||
++      !base::StringToInt(command_line.GetSwitchValueASCII(
++                             switches::kFingerprintScreenWidth),
++                         &width) ||
++      !base::StringToInt(command_line.GetSwitchValueASCII(
++                             switches::kFingerprintScreenHeight),
++                         &height) ||
++      width < 320 || width > 8192 || height < 320 || height > 8192) {
++    return std::nullopt;
++  }
++  return gfx::Size(width, height);
++}
++
++// Gives the persona's screen to the built-in display (the primary display when
++// there is none): same origin, the persona's size, and an available area that
++// keeps the real menu bar and Dock insets. Other displays are left alone, and
++// applying it twice gives the same result.
++void ApplyPersonaScreen(display::ScreenInfos& screen_infos) {
++  const std::optional<gfx::Size> size = PersonaScreenSize();
++  if (!size) {
++    return;
++  }
++  display::ScreenInfo* target = nullptr;
++  for (display::ScreenInfo& info : screen_infos.screen_infos) {
++    if (info.is_internal) {
++      target = &info;
++      break;
++    }
++  }
++  if (!target) {
++    for (display::ScreenInfo& info : screen_infos.screen_infos) {
++      if (info.is_primary) {
++        target = &info;
++        break;
++      }
++    }
++  }
++  if (!target) {
++    return;
++  }
++  const gfx::Rect rect = target->rect;
++  const gfx::Rect available = target->available_rect;
++  const int left = std::max(0, available.x() - rect.x());
++  const int top = std::max(0, available.y() - rect.y());
++  const int right = std::max(0, rect.right() - available.right());
++  const int bottom = std::max(0, rect.bottom() - available.bottom());
++  target->rect = gfx::Rect(rect.origin(), *size);
++  target->available_rect =
++      gfx::Rect(rect.x() + left, rect.y() + top,
++                std::max(0, size->width() - left - right),
++                std::max(0, size->height() - top - bottom));
+ }
+ 
+ }  // namespace
+@@ -2022,8 +2087,11 @@
+ display::ScreenInfos RenderWidgetHostImpl::GetScreenInfos() const {
+   TRACE_EVENT0("renderer_host", "RenderWidgetHostImpl::GetScreenInfos");
+ 
+-  return view_ ? view_->GetScreenInfos()
+-               : display::ScreenInfos(GetScreenInfo());
++  display::ScreenInfos screen_infos =
++      view_ ? view_->GetScreenInfos() : display::ScreenInfos(GetScreenInfo());
++  // persona-chromium: web content sees the persona's screen (see above).
++  ApplyPersonaScreen(screen_infos);
++  return screen_infos;
+ }
+ 
+ float RenderWidgetHostImpl::GetDeviceScaleFactor() {
+--- a/components/remote_cocoa/app_shim/views_nswindow_delegate.mm
++++ b/components/remote_cocoa/app_shim/views_nswindow_delegate.mm
+@@ -4,11 +4,14 @@
+ 
+ #import "components/remote_cocoa/app_shim/views_nswindow_delegate.h"
+ 
++#include <algorithm>
+ #include <optional>
+ 
+ #include "base/check.h"
++#include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/mac/mac_util.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
+ #import "components/remote_cocoa/app_shim/bridged_content_view.h"
+ #import "components/remote_cocoa/app_shim/native_widget_ns_window_bridge.h"
+@@ -29,6 +32,69 @@
+ - (NSWindowLiveResizeEdge)liveResizeEdges;
+ @end
+ 
++namespace {
++
++// persona-chromium: the persona's screen size from --fingerprint-screen-width
++// and --fingerprint-screen-height, or an empty size when there is none (see
++// render_widget_host_impl.cc). Switch names are read as literals because
++// remote_cocoa does not depend on components/ungoogled.
++NSSize PersonaScreenSize() {
++  const base::CommandLine& command_line =
++      *base::CommandLine::ForCurrentProcess();
++  int width = 0;
++  int height = 0;
++  if (!command_line.HasSwitch("fingerprint") ||
++      command_line.GetSwitchValueASCII("disable-spoofing").find("screen") !=
++          std::string::npos ||
++      !base::StringToInt(
++          command_line.GetSwitchValueASCII("fingerprint-screen-width"),
++          &width) ||
++      !base::StringToInt(
++          command_line.GetSwitchValueASCII("fingerprint-screen-height"),
++          &height) ||
++      width < 320 || width > 8192 || height < 320 || height > 8192) {
++    return NSZeroSize;
++  }
++  return NSMakeSize(width, height);
++}
++
++// The persona's available area in Cocoa coordinates when `screen` is the
++// persona's screen (the built-in display, or the first screen when there is
++// none): the persona screen shares the real screen's top-left corner and keeps
++// its menu bar and Dock insets. NSZeroRect otherwise.
++NSRect PersonaVisibleFrame(NSScreen* screen) {
++  const NSSize size = PersonaScreenSize();
++  if (size.width <= 0 || !screen) {
++    return NSZeroRect;
++  }
++  NSScreen* target = nil;
++  for (NSScreen* candidate in [NSScreen screens]) {
++    NSNumber* number = candidate.deviceDescription[@"NSScreenNumber"];
++    if (number && CGDisplayIsBuiltin(number.unsignedIntValue)) {
++      target = candidate;
++      break;
++    }
++  }
++  if (!target) {
++    target = [NSScreen screens].firstObject;
++  }
++  if (![screen isEqual:target]) {
++    return NSZeroRect;
++  }
++  const NSRect frame = screen.frame;
++  const NSRect visible = screen.visibleFrame;
++  const CGFloat left = std::max<CGFloat>(0, NSMinX(visible) - NSMinX(frame));
++  const CGFloat right = std::max<CGFloat>(0, NSMaxX(frame) - NSMaxX(visible));
++  const CGFloat bottom = std::max<CGFloat>(0, NSMinY(visible) - NSMinY(frame));
++  const CGFloat top = std::max<CGFloat>(0, NSMaxY(frame) - NSMaxY(visible));
++  return NSMakeRect(NSMinX(frame) + left,
++                    NSMaxY(frame) - size.height + bottom,
++                    std::max<CGFloat>(0, size.width - left - right),
++                    std::max<CGFloat>(0, size.height - top - bottom));
++}
++
++}  // namespace
++
+ @implementation ViewsNSWindowDelegate {
+  @private
+   raw_ptr<remote_cocoa::NativeWidgetNSWindowBridge, DanglingUntriaged>
+@@ -179,6 +245,15 @@
+     // Discard any updates to |resizedWindowRect| origin as Cocoa takes care of
+     // that.
+     size = resizedWindowRect.size().ToCGSize();
++  }
++
++  // persona-chromium: resizing stops at the persona's available area.
++  if (window.styleMask & NSWindowStyleMaskTitled) {
++    const NSRect persona = PersonaVisibleFrame(window.screen);
++    if (!NSIsEmptyRect(persona)) {
++      size.width = std::min(size.width, NSWidth(persona));
++      size.height = std::min(size.height, NSHeight(persona));
++    }
+   }
+ 
+   // For live-resize, reject the automatic resize. Instead, tell the compositor
+@@ -354,6 +429,14 @@
+ // window frame is equal to the zoomed frame.
+ - (NSRect)windowWillUseStandardFrame:(NSWindow*)window
+                         defaultFrame:(NSRect)newFrame {
++  // persona-chromium: zooming stops at the persona's available area.
++  if (window.styleMask & NSWindowStyleMaskTitled) {
++    const NSRect clipped =
++        NSIntersectionRect(newFrame, PersonaVisibleFrame(window.screen));
++    if (!NSIsEmptyRect(clipped)) {
++      return clipped;
++    }
++  }
+   return newFrame;
+ }
+ 
