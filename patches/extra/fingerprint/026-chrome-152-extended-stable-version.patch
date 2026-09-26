@@ -1,0 +1,35 @@
+This kernel is built from Chrome 152 extended stable 152.0.7977.140, which
+carries the security fixes Google backported to 152. The Chrome version a
+page sees without --fingerprint-brand-version (and the version list that
+002 picks from by seed) now starts at this release instead of the 152
+stable release 152.0.7977.85. persona-profiles always passes the version
+from its kernel manifest, which is 152.0.7977.140 as well.
+
+--- a/components/ungoogled/fingerprint_data.h
++++ b/components/ungoogled/fingerprint_data.h
+@@ -24,18 +24,19 @@
+ // =============================================================================
+ 
+ // Chromium version list (for seed-based selection)
+-// Chrome 152 stable releases on Mac and Windows (chromiumdash, 2026-09-15).
++// Chrome 152 extended stable releases on Mac and Windows (versionhistory,
++// 2026-09-25), newest first; this build is 152.0.7977.140.
+ constexpr const char* kChromiumVersions[] = {
+-    "152.0.7977.85",
+-    "152.0.7977.84",
+-    "152.0.7977.83",
+-    "152.0.7977.82"
++    "152.0.7977.140",
++    "152.0.7977.134",
++    "152.0.7977.130",
++    "152.0.7977.120"
+ };
+ 
+ // Default versions for Client Hints (Sec-CH-UA)
+ // Edge 152 stable (edgeupdates API), Opera 136 is the first Opera on Chromium 152 (developer channel),
+ // Vivaldi 8.2 stable is on Chromium 152.
+-constexpr const char* kChromeDefaultVersion = "152.0.7977.85";
++constexpr const char* kChromeDefaultVersion = "152.0.7977.140";
+ constexpr const char* kEdgeDefaultVersion = "152.0.4191.66";
+ constexpr const char* kOperaDefaultVersion = "136.0.5995.0";
+ constexpr const char* kVivaldiDefaultVersion = "8.2.4133.47";

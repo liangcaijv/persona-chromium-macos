@@ -37,3 +37,4 @@ extra/fingerprint/023-macos-system-fonts-only.patch
 extra/fingerprint/021-macos-persona-screen.patch
 extra/fingerprint/024-macos-system-font-copies.patch
 extra/fingerprint/025-macos-system-font-files.patch
+extra/fingerprint/026-chrome-152-extended-stable-version.patch
