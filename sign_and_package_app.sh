@@ -13,7 +13,7 @@ _pkg_dmg="$_src_dir/chrome/installer/mac/pkg-dmg"
 _ad_hoc="${MACOS_AD_HOC_SIGNING:-0}"
 _target_dmg="${1:-}"
 if [[ -z "$_target_dmg" ]]; then
-  _chromium_version="$(cat "$_root_dir/ungoogled-chromium/chromium_version.txt")"
+  _chromium_version="$(cat "$_root_dir/chromium_version.txt")"
   _ungoogled_revision="$(cat "$_root_dir/ungoogled-chromium/revision.txt")"
   _package_revision="$(cat "$_root_dir/revision.txt")"
   _target_dmg="$_root_dir/build/ungoogled-chromium_${_chromium_version}-${_ungoogled_revision}.${_package_revision}_macos.dmg"

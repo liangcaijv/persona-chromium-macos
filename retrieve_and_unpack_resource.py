@@ -21,6 +21,20 @@ SRC_DIR = ROOT_DIR / "build" / "src"
 MAIN_REPO = ROOT_DIR / "ungoogled-chromium"
 UTILS_DIR = MAIN_REPO / "utils"
 CLONE_STATE = DOWNLOAD_CACHE / "resource_stamps" / "chromium-clone.json"
+# The Chromium release this branch builds. It can be newer than the submodule's
+# chromium_version.txt: fp-152.0.7977.140 builds a Chrome extended stable release
+# with the ungoogled-chromium 152.0.7977.82-1 patches.
+CHROMIUM_VERSION_FILE = ROOT_DIR / "chromium_version.txt"
+# clone.py takes its version from the submodule; run it with this branch's version.
+_CLONE_WITH_VERSION = """
+import runpy, sys
+sys.path.insert(0, sys.argv.pop(1))
+import _common
+version = sys.argv.pop(1)
+_common.get_chromium_version = lambda: version
+sys.argv[0] = sys.argv.pop(1)
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
 
 # The ungoogled-chromium utilities use sibling imports when run as scripts.
 sys.path.insert(0, str(UTILS_DIR))
@@ -225,7 +239,7 @@ def _source_contents_hash() -> str | None:
 def _expected_clone_state(pgo_profile: str) -> dict[str, str | int]:
     return {
         "schema": 2,
-        "chromium_version": (MAIN_REPO / "chromium_version.txt").read_text().strip(),
+        "chromium_version": CHROMIUM_VERSION_FILE.read_text().strip(),
         "pgo_profile": pgo_profile,
         "clone_recipe_sha256": _clone_recipe_hash(),
     }
@@ -295,19 +309,23 @@ def _retrieve_generic(target_cpu: str, clone: bool) -> None:
         if _source_clone_is_reusable(pgo_profile):
             LOGGER.info(
                 "Chromium %s source at %s",
-                (MAIN_REPO / "chromium_version.txt").read_text().strip(),
+                CHROMIUM_VERSION_FILE.read_text().strip(),
                 SRC_DIR,
                 extra={"cache_hit": True},
             )
             return
 
         _remove(CLONE_STATE)
-        _run(sys.executable, MAIN_REPO / "utils" / "clone.py", "-p", pgo_profile,
-             "-o", SRC_DIR)
+        _run(sys.executable, "-c", _CLONE_WITH_VERSION, UTILS_DIR,
+             CHROMIUM_VERSION_FILE.read_text().strip(), UTILS_DIR / "clone.py",
+             "-p", pgo_profile, "-o", SRC_DIR)
         _write_clone_state(pgo_profile)
     else:
-        _remove(CLONE_STATE)
-        _retrieve_and_unpack(MAIN_REPO / "downloads.ini")
+        # The submodule's downloads.ini names its own version's source archive, and Google
+        # publishes no archive for extended stable releases.
+        raise RuntimeError(
+            f"No source archive for Chromium {CHROMIUM_VERSION_FILE.read_text().strip()}; "
+            "build from a clone (omit -d)")
 
 
 def _host_architecture() -> str:

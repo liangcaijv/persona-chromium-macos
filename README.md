@@ -13,6 +13,14 @@ are source-level and architecture independent.
 Branches are named `fp-<chromium version>`; one branch serves both arm64 and
 x86_64. The default branch is upstream's and is not used for builds.
 
+The Chromium version a branch builds is in `chromium_version.txt` at the top
+of this repository, not the submodule's. `fp-152.0.7977.140` builds the Chrome
+152 extended stable release 152.0.7977.140 (which carries Google's backported
+security fixes, including CVE-2026-87491) with the ungoogled-chromium
+152.0.7977.82-1 patches; upstream's macOS packaging has no release after
+152.0.7977.82 and Google publishes no source archive for extended stable, so
+this branch builds from a clone only (`build.sh` without `-d`).
+
 ## Build (local, the primary path)
 
 Same requirements as upstream's README: Xcode 26 (opened once, license

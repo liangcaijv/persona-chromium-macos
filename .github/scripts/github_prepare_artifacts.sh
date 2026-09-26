@@ -13,7 +13,7 @@ _src_dir="$_root_dir/build/src"
 # If build finished successfully
 if [[ -f "$_root_dir/build_finished_$_target_cpu.log" ]] ; then
   # For packaging
-  _chromium_version="$(cat "$_root_dir/ungoogled-chromium/chromium_version.txt")"
+  _chromium_version="$(cat "$_root_dir/chromium_version.txt")"
   _ungoogled_revision="$(cat "$_root_dir/ungoogled-chromium/revision.txt")"
   _package_revision="$(cat "$_root_dir/revision.txt")"
 
